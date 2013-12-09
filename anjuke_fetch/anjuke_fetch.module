@@ -1,0 +1,187 @@
+﻿<?php
+/**
+ * @file
+ * Code for the anjuke fetch feature.
+ */
+
+define('BR', '<br />');
+include_once 'anjuke_fetch.features.inc';
+function anjuke_fetch_cron() {
+  $urls = array(
+    'http://shanghai.anjuke.com/sale/changning/o5',
+    'http://shanghai.anjuke.com/sale/jingan/o5',
+    'http://shanghai.anjuke.com/sale/luwan/o5',
+    'http://shanghai.anjuke.com/sale/xuhui/o5'
+  );
+  foreach ($urls as $url) {
+    $switch = TRUE;
+    $i = 1;
+    while ($switch) {
+      $link = $url  . '-p' . $i . '/';
+      watchdog('anjuke', $link);
+      $switch = anjunke_list_fetch($link);
+      $i++;
+    }
+    //Reset $switch.
+    $switch = TRUE;
+    //超过50页,退出循环,以避免死循环.
+    if ($i >50) {
+      break;
+    }
+  }
+}
+//抓取列表页数据,列表例子
+//http://shanghai.anjuke.com/sale/changning/
+function anjunke_list_fetch($list_link) {
+  $str = file_get_html1($list_link);
+  if (!$str) {
+    return FALSE;
+  }
+  $html = str_get_html($str);
+  $i = 0;
+  foreach ($html->find('.list li') as $id => $item) {
+    $i++;
+    $floor = $item->find('.details', 0)->find('div',1)->find('span',6)->plaintext;
+    //判断下,只有顶楼的才抓取
+    $switch = FALSE;
+    if (preg_match('/共(\d+)层/', $floor, $match) && $match[1] < 5) {
+  	  $switch = TRUE;
+    }
+    if (preg_match('/(\d+)\/(\d+)/' ,$floor, $match)) {
+  	  if (isset($match[1]) && isset($match[2]) && $match[1] == $match[2]) {
+  	    $switch = TRUE;
+  	  }
+    }
+    //如果是顶楼..
+    if ($switch) {
+      $link = $item->find('a',0)->href;
+      //获取编号..
+      preg_match('/prop\/view\/(\d+)/', $link, $match);
+      $house_id = $match[1];
+      //如果房产编号不存在,则保存此数据...
+      if (!_check_house_id($house_id)) {
+        _save_house_by_link($link);
+      }
+      else {
+        return FALSE;
+      }
+	  }
+	}
+  $html->clear();
+  unset($html);
+  return TRUE;
+}
+  
+function _save_house_by_link($link) {
+  $str = file_get_html1($link);
+  if (!$str) {
+    return FALSE;
+  }
+  $page = str_get_html($str);
+  $price = $page->find('.highlightPrice', 0)->plaintext;
+  $floor = $page->find('.A-fangyuan-parms .line', 4)->find('.wid-148', 0)->plaintext;
+  $year = $page->find('.A-fangyuan-parms .line', 4)->find('p', 3)->plaintext;
+  $area = $page->find('.A-fangyuan-parms .line', 3)->find('.wid-148', 0)->plaintext;
+  $region = $page->find('.A-fangyuan-parms .line', 6)->find('a', 0)->plaintext;
+  $address = $page->find('.A-fangyuan-parms .line', 6)->find('p', 1)->plaintext;
+  $estate = $page->find('.A-fangyuan-parms .line', 5)->find('a', 0)->plaintext;
+  $publish = drupal_substr($page->find('.house-information .right-title span', 0)->plaintext,0, 10);
+  $id = intval(drupal_substr($page->find('.house-information .right-title span', 1)->plaintext, 5));
+  $image_path = $page->find('.slide-box .slide-view img', 0)->src;
+  $map = $page->find('.A-fangyuan-parms .line', 6)->find('a', 2)->href;
+
+  $node = entity_create('node', 
+    array(
+      'type' => 'house',
+      'title' => implode('-', array($region, $estate, $floor, $price . '万')),
+      'uid' => 1,
+      'created' => REQUEST_TIME,
+    )
+  );
+  $nw = entity_metadata_wrapper('node', $node);
+  $nw->field_price->set(intval($price));
+  $nw->field_area->set(intval($area));
+  //匹配获得楼层信息..
+  if (preg_match('/共(\d+)层/', $floor, $match) && $match[1] < 5) {
+    $floor = 0;
+    $total_floor = $match[1];
+  }
+  if (preg_match('/(\d+)\/(\d+)/' ,$floor, $match)) {
+    $floor = $match[1];
+    $total_floor = $match[2];
+  }
+  $nw->field_floor->set($floor);
+  $nw->field_total_floor->set($total_floor);
+  $nw->field_build_year->set(intval($year));
+  //小区,是个term..
+  $estate1 = _house_category($estate, 'estate');
+  $nw->field_estate->set($estate1);
+  //区,是个term..
+  $region1 = _house_category($region, 'region');
+  $nw->field_region->set($region1);
+
+  $nw->field_ad->set(substr($address, 0, strpos($address, '（')));
+  $nw->field_house_id->set($id);
+  //set up the default image.
+  $default_image = 'http://pages.anjukestatic.com/img/global/nopic_320x240.gif';
+  $image_path = empty($image_path) ? $default_image : $image_path;
+  $image = _get_image($image_path, $id);
+  $nw->field_image->set($image);
+  $nw->field_date->set(strtotime($publish));
+  $nw->field_link->set(array('url' =>$link));
+  $nw->field_map->set(array('url' =>$map));
+  $nw->save();
+  $page->clear();
+  unset($page);
+  print $link . " : OK";
+  print BR;
+  return $node;
+}
+
+function _check_house_id($house_id) {
+  $query = new EntityFieldQuery();
+  $query->entityCondition('entity_type', 'node')
+    ->entityCondition('bundle', 'house')
+    ->fieldCondition('field_house_id', 'value', $house_id);
+  $res = $query->count()->execute();
+  return $res;
+}
+
+//helper function to save image to drupal file system.
+function _house_category($name, $voc) {
+  $term = taxonomy_get_term_by_name($name, $voc);
+  if (empty($term)) {
+    $voc = taxonomy_vocabulary_machine_name_load($voc);
+
+    $term = new stdClass();
+    $term->name = $name;
+    $term->vid = $voc->vid;
+
+    taxonomy_term_save($term);
+  }
+  else {
+    $term = reset($term);
+  }
+  return $term;
+}
+//helper function to save image to drupal file system.
+function _get_image($path, $filename = NULL) {
+  $image = file_get_contents($path); // string
+  $file = file_save_data($image, 'public://house/' . $filename . '.jpg',FILE_EXISTS_REPLACE);
+  if (is_object($file)) { 
+    $file->status = 1;
+    $file = file_save($file);
+  }
+  return (array)$file;
+}
+
+function file_get_html1($url) {
+  $str = drupal_http_request($url);
+  if ($str->code == 200) {
+    return $str->data;
+  }
+  else {
+    watchdog('anjuke', 'Failed on : ' . $url,array(), WATCHDOG_WARNING);
+    return FALSE;
+  }
+}
