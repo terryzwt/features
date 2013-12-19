@@ -65,8 +65,8 @@ function anjunke_list_fetch($list_link) {
       else {
         return FALSE;
       }
-	  }
-	}
+    }
+  }
   $html->clear();
   unset($html);
   return TRUE;
